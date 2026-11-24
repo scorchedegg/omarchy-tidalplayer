@@ -15,6 +15,7 @@ Stream up to 24-bit/192 kHz FLAC straight to PipeWire — or cast losslessly to 
 - **Complete Native UI** — Now Playing with animated covers and blurred glass backdrops, click-to-seek synced lyrics, play queue, library browser (Tracks, Artists, Playlists, Albums, Recently Played, Mixes), universal search, artist discographies and bios, and inline playlist editing — all styled live with your active Omarchy theme.
 - **Bar Widget & Volume OSD** — Compact track info and artwork right in your bar. Scroll to adjust volume (up to 150% locally) with a dedicated TIDAL volume toast, `Ctrl`+scroll to seek, middle-click to play/pause, and use mouse back/forward to skip tracks.
 - **Keyboard-First & Scriptable** — Direct vim-friendly shortcuts throughout the panel (`?` opens the built-in shortcut reference), global MPRIS2 media-key support, shell IPC for Hyprland bindings, and a standalone CLI.
+- **Ready for x86_64 & ARM64** — Ships native binaries for both `x86_64` and `aarch64` (including Omarchy on Apple Silicon), working out of the box with no extra setup or compilation step.
 
 ## Requirements
 
@@ -89,7 +90,7 @@ omarchy-tidalplayer help                  # list all CLI commands
 
 ## Building from Source
 
-A stripped `x86_64` release binary ships in `bin/omarchy-tidalplayer`, so no Rust toolchain is required on `x86_64`. On ARM64 / Apple Silicon (Omarchy M or Try Omarchy) — or to rebuild from source and run the test suite (requires Rust/`cargo`):
+Prebuilt `x86_64` and `aarch64` binaries ship in `bin/` (verified against CI builds in `SHA256SUMS`), so no Rust toolchain is required to install. To rebuild for your architecture or run the test suite yourself (requires Rust/`cargo`):
 
 ```bash
 ./scripts/build-daemon.sh

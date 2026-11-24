@@ -30,6 +30,12 @@ pub struct SessionTokens {
     pub country_code: String,
     #[serde(default)]
     pub expires_at: i64,
+    /// Monotonic session epoch held under the same `RwLock` as the credentials.
+    /// Incremented atomically whenever `logout` clears the session or a new
+    /// PKCE sign-in replaces it, so a reader cannot observe old credentials
+    /// paired with a post-logout generation.
+    #[serde(skip)]
+    pub(crate) generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +90,6 @@ pub struct AuthManager {
     http: reqwest::Client,
     refresh_lock: tokio::sync::Mutex<()>,
     session_io_lock: Arc<tokio::sync::Mutex<()>>,
-    session_generation: Arc<AtomicU64>,
     pending_pkce: Arc<tokio::sync::Mutex<Option<PendingPkce>>>,
     pkce_counter: Arc<AtomicU64>,
 }
@@ -102,7 +107,6 @@ impl AuthManager {
             http,
             refresh_lock: tokio::sync::Mutex::new(()),
             session_io_lock: Arc::new(tokio::sync::Mutex::new(())),
-            session_generation: Arc::new(AtomicU64::new(0)),
             pending_pkce: Arc::new(tokio::sync::Mutex::new(None)),
             pkce_counter: Arc::new(AtomicU64::new(0)),
         }
@@ -204,6 +208,7 @@ impl AuthManager {
                         client_id,
                         country_code: cc,
                         expires_at,
+                        generation: 0,
                     };
                 }
             }
@@ -276,7 +281,6 @@ impl AuthManager {
             let tokens = self.tokens.clone();
             let pending_pkce = self.pending_pkce.clone();
             let session_io_lock = self.session_io_lock.clone();
-            let session_generation = self.session_generation.clone();
             tokio::spawn(async move {
                 let mut seen_code = seen_before;
                 loop {
@@ -320,7 +324,6 @@ impl AuthManager {
                         &tokens,
                         &pending_pkce,
                         &session_io_lock,
-                        &session_generation,
                         id,
                         &code,
                         &code_verifier,
@@ -384,7 +387,6 @@ impl AuthManager {
             &self.tokens,
             &self.pending_pkce,
             &self.session_io_lock,
-            &self.session_generation,
             id,
             &code,
             &code_verifier,
@@ -461,7 +463,6 @@ impl AuthManager {
 
         let (generation, refresh_token, client_id) = {
             let tokens = self.tokens.read().await;
-            let generation = self.session_generation.load(Ordering::SeqCst);
             if !tokens.access_token.is_empty() && tokens.access_token != before_access {
                 // Another concurrent request already refreshed the token while we waited.
                 return Ok(true);
@@ -471,7 +472,7 @@ impl AuthManager {
             } else {
                 tokens.client_id.clone()
             };
-            (generation, tokens.refresh_token.clone(), cid)
+            (tokens.generation, tokens.refresh_token.clone(), cid)
         };
 
         if refresh_token.is_empty() {
@@ -558,13 +559,12 @@ impl AuthManager {
             .unwrap_or(86400);
 
         let _io_guard = self.session_io_lock.lock().await;
-        if self.session_generation.load(Ordering::SeqCst) != expected_generation {
-            info!("Discarding stale TIDAL token refresh after logout or re-login");
-            return false;
-        }
-
         let json = {
             let mut tokens = self.tokens.write().await;
+            if tokens.generation != expected_generation {
+                info!("Discarding stale TIDAL token refresh after logout or re-login");
+                return false;
+            }
             tokens.access_token = access.clone();
             if let Some(r) = refresh {
                 tokens.refresh_token = r;
@@ -602,16 +602,20 @@ impl AuthManager {
     }
 
     async fn logout_from_file(&self, file: PathBuf) {
-        // Bump immediately so any refresh awaiting a network response sees the
-        // logout even before we take the session I/O lock, then bump again
-        // inside the lock so in-flight commits and disk removal are atomic.
-        self.session_generation.fetch_add(1, Ordering::SeqCst);
+        // Cancel any in-flight PKCE sign-in, then serialise against refresh/login
+        // commits via `session_io_lock` and advance `tokens.generation` under
+        // the exact `tokens.write()` guard that clears credentials. Because no
+        // reader can hold `tokens.read()` across that write, old credentials
+        // can never be paired with the post-logout generation.
         *self.pending_pkce.lock().await = None;
         let _io_guard = self.session_io_lock.lock().await;
-        self.session_generation.fetch_add(1, Ordering::SeqCst);
         {
             let mut tokens = self.tokens.write().await;
-            *tokens = SessionTokens::default();
+            let next_generation = tokens.generation.wrapping_add(1);
+            *tokens = SessionTokens {
+                generation: next_generation,
+                ..SessionTokens::default()
+            };
         }
         let tmp = file.with_extension("json.tmp");
         let _ = tokio::fs::remove_file(&file).await;
@@ -625,7 +629,6 @@ async fn exchange_pkce_code(
     tokens: &Arc<RwLock<SessionTokens>>,
     pending_pkce: &Arc<tokio::sync::Mutex<Option<PendingPkce>>>,
     session_io_lock: &Arc<tokio::sync::Mutex<()>>,
-    session_generation: &Arc<AtomicU64>,
     expected_id: u64,
     code: &str,
     code_verifier: &str,
@@ -667,8 +670,8 @@ async fn exchange_pkce_code(
         .await
         .map_err(|e| format!("Failed to parse TIDAL token response: {e}"))?;
 
-    // Hold session_io_lock across pending_pkce check, generation bump, token
-    // update and disk save so logout() cannot interleave with sign-in.
+    // Hold session_io_lock across pending_pkce check, token/generation update
+    // and disk save so logout() cannot interleave with sign-in.
     let _io_guard = session_io_lock.lock().await;
 
     // Check that this pending login wasn't already completed or cancelled while
@@ -681,10 +684,9 @@ async fn exchange_pkce_code(
         *guard = None;
     }
 
-    session_generation.fetch_add(1, Ordering::SeqCst);
-
     let json = {
         let mut guard = tokens.write().await;
+        guard.generation = guard.generation.wrapping_add(1);
         guard.access_token = token_res.access_token.clone();
         guard.client_id = PKCE_CLIENT_ID.to_string();
         guard.refresh_token = token_res.refresh_token.unwrap_or_default();
@@ -1077,6 +1079,7 @@ mod tests {
             client_id: PKCE_CLIENT_ID.to_string(),
             country_code: "US".to_string(),
             expires_at: 1_900_000_000,
+            generation: 0,
         };
         std::fs::write(&file, serde_json::to_string(&saved).unwrap()).unwrap();
 
@@ -1098,7 +1101,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("session.json");
 
-        let auth = AuthManager::new();
+        let auth = Arc::new(AuthManager::new());
         {
             let mut tokens = auth.tokens.write().await;
             tokens.access_token = "old-access".to_string();
@@ -1106,10 +1109,25 @@ mod tests {
             tokens.user_id = 42;
             tokens.country_code = "US".to_string();
         }
-        let gen_before_logout = auth.session_generation.load(Ordering::SeqCst);
 
-        // User logs out while the refresh request for the old account is in flight.
-        auth.logout_from_file(file.clone()).await;
+        // Hold the token read lock while a concurrent logout starts and waits
+        // on the write lock: the reader must still observe the pre-logout
+        // generation paired with the old credentials.
+        let (gen_before_logout, logout_task) = {
+            let read_guard = auth.tokens.read().await;
+            let auth_for_logout = auth.clone();
+            let file_for_logout = file.clone();
+            let logout_task = tokio::spawn(async move {
+                auth_for_logout.logout_from_file(file_for_logout).await;
+            });
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(read_guard.refresh_token, "old-refresh");
+            let observed_gen = read_guard.generation;
+            (observed_gen, logout_task)
+        };
+
+        logout_task.await.unwrap();
         assert!(!auth.is_logged_in().await);
         assert!(!file.exists());
 
@@ -1133,7 +1151,7 @@ mod tests {
         assert!(!file.exists(), "session.json must not be recreated after logout");
 
         // A refresh captured for the current generation still applies normally.
-        let current_gen = auth.session_generation.load(Ordering::SeqCst);
+        let current_gen = auth.tokens.read().await.generation;
         let applied_current = auth
             .apply_refreshed_tokens_to_file(current_gen, &payload, file.clone())
             .await;

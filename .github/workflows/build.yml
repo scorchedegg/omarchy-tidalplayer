@@ -1,0 +1,111 @@
+name: Build & Verify
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+            artifact: omarchy-tidalplayer-x86_64
+            cflags: "-march=x86-64 -mtune=generic"
+            target_cpu_flag: "-C target-cpu=x86-64"
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+            artifact: omarchy-tidalplayer-aarch64
+            cflags: ""
+            target_cpu_flag: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build daemon binary from source (${{ matrix.arch }})
+        env:
+          CARGO_INCREMENTAL: "0"
+          SOURCE_DATE_EPOCH: "1700000000"
+          CFLAGS: ${{ matrix.cflags }}
+        run: |
+          CARGO_HOME_DIR="${CARGO_HOME:-${HOME}/.cargo}"
+          ROOT="${GITHUB_WORKSPACE}"
+          RUSTFLAGS="--remap-path-prefix=${CARGO_HOME_DIR}=/cargo --remap-path-prefix=${ROOT}=/src -C metadata=omarchy-tidalplayer ${{ matrix.target_cpu_flag }}" \
+            cargo build --release --locked --manifest-path daemon/Cargo.toml
+          mkdir -p dist
+          install -Dm755 daemon/target/release/omarchy-tidalplayer "dist/${{ matrix.artifact }}"
+          sha256sum "dist/${{ matrix.artifact }}"
+
+      - name: Upload ${{ matrix.arch }} binary artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 90
+
+  verify:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download built binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Run manifest, QML, and JS checks
+        run: |
+          python3 tests/validate-manifest.py .
+          python3 tests/check-textformat.py .
+          python3 tests/check-async-guards.py .
+          python3 tests/check-js-imports.py .
+          node --test tests/js.test.mjs
+          sh -n bin/omarchy-tidalplayer
+          bash -n scripts/build-daemon.sh scripts/uninstall.sh
+
+      - name: Generate SHA256SUMS
+        run: |
+          chmod 755 dist/omarchy-tidalplayer-x86_64 dist/omarchy-tidalplayer-aarch64
+          (cd dist && sha256sum omarchy-tidalplayer-x86_64 omarchy-tidalplayer-aarch64 > SHA256SUMS)
+          echo "CI built SHA256SUMS:"
+          cat dist/SHA256SUMS
+
+      - name: Verify committed binaries match CI builds and SHA256SUMS
+        if: hashFiles('SHA256SUMS') != ''
+        run: |
+          diff -u SHA256SUMS dist/SHA256SUMS
+          cmp bin/omarchy-tidalplayer-x86_64 dist/omarchy-tidalplayer-x86_64
+          cmp bin/omarchy-tidalplayer-aarch64 dist/omarchy-tidalplayer-aarch64
+          echo "Exact byte-for-byte match verified for x86_64 and aarch64."
+
+      - name: Upload combined release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: omarchy-tidalplayer-binaries
+          path: |
+            dist/omarchy-tidalplayer-x86_64
+            dist/omarchy-tidalplayer-aarch64
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Generate build provenance attestations
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: "dist/omarchy-tidalplayer-*"
