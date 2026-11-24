@@ -4,6 +4,7 @@
 //! and `/playback/action` read and drive it, and the local mpv pipeline is
 //! stopped. Disconnecting hands playback back to mpv at the cast position.
 
+mod auth;
 mod bridge;
 mod discovery;
 mod media;

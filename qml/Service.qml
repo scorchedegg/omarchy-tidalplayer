@@ -73,6 +73,8 @@ Item {
         root.loadRecentSearches()
       } else {
         root.statusLoaded = false
+        castSpinTimer.stop()
+        root.castLoading = false
       }
     }
   }
@@ -2145,7 +2147,10 @@ Item {
     if (!quiet) root.beginCastLoading()
     rpc("cast.devices", { refresh: !!refresh }, function(err, data) {
       if (generation !== root.castRequestGeneration) return
-      if (!quiet) root.endCastLoading()
+      // Always settle the spinner if one is running: a quiet refresh (e.g.
+      // after a failed connect) can supersede an in-flight loud refresh and
+      // would otherwise strand `castLoading` at true forever.
+      if (root.castLoading) root.endCastLoading()
       if (!err && data) {
         root.castDevices = data.devices || []
         root.castLastUsedId = String(data.last_used_id || "")

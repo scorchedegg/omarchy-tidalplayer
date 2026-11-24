@@ -83,6 +83,8 @@ pub struct AuthManager {
     pub tokens: Arc<RwLock<SessionTokens>>,
     http: reqwest::Client,
     refresh_lock: tokio::sync::Mutex<()>,
+    session_io_lock: Arc<tokio::sync::Mutex<()>>,
+    session_generation: Arc<AtomicU64>,
     pending_pkce: Arc<tokio::sync::Mutex<Option<PendingPkce>>>,
     pkce_counter: Arc<AtomicU64>,
 }
@@ -99,6 +101,8 @@ impl AuthManager {
             tokens,
             http,
             refresh_lock: tokio::sync::Mutex::new(()),
+            session_io_lock: Arc::new(tokio::sync::Mutex::new(())),
+            session_generation: Arc::new(AtomicU64::new(0)),
             pending_pkce: Arc::new(tokio::sync::Mutex::new(None)),
             pkce_counter: Arc::new(AtomicU64::new(0)),
         }
@@ -207,20 +211,6 @@ impl AuthManager {
         SessionTokens::default()
     }
 
-    pub async fn save_session(&self) {
-        let json = {
-            let tokens = self.tokens.read().await;
-            match serde_json::to_string_pretty(&*tokens) {
-                Ok(json) => json,
-                Err(error) => {
-                    warn!("Failed to serialize TIDAL session: {error}");
-                    return;
-                }
-            }
-        };
-        save_session_json(json).await;
-    }
-
     pub async fn is_logged_in(&self) -> bool {
         let tokens = self.tokens.read().await;
         !tokens.access_token.is_empty()
@@ -285,6 +275,8 @@ impl AuthManager {
             let http = self.http.clone();
             let tokens = self.tokens.clone();
             let pending_pkce = self.pending_pkce.clone();
+            let session_io_lock = self.session_io_lock.clone();
+            let session_generation = self.session_generation.clone();
             tokio::spawn(async move {
                 let mut seen_code = seen_before;
                 loop {
@@ -327,6 +319,8 @@ impl AuthManager {
                         &http,
                         &tokens,
                         &pending_pkce,
+                        &session_io_lock,
+                        &session_generation,
                         id,
                         &code,
                         &code_verifier,
@@ -389,6 +383,8 @@ impl AuthManager {
             &self.http,
             &self.tokens,
             &self.pending_pkce,
+            &self.session_io_lock,
+            &self.session_generation,
             id,
             &code,
             &code_verifier,
@@ -463,8 +459,9 @@ impl AuthManager {
         let before_access = self.tokens.read().await.access_token.clone();
         let _refresh_guard = self.refresh_lock.lock().await;
 
-        let (refresh_token, client_id) = {
+        let (generation, refresh_token, client_id) = {
             let tokens = self.tokens.read().await;
+            let generation = self.session_generation.load(Ordering::SeqCst);
             if !tokens.access_token.is_empty() && tokens.access_token != before_access {
                 // Another concurrent request already refreshed the token while we waited.
                 return Ok(true);
@@ -474,7 +471,7 @@ impl AuthManager {
             } else {
                 tokens.client_id.clone()
             };
-            (tokens.refresh_token.clone(), cid)
+            (generation, tokens.refresh_token.clone(), cid)
         };
 
         if refresh_token.is_empty() {
@@ -514,55 +511,19 @@ impl AuthManager {
 
         if status.is_success() {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                let access = val
-                    .get("access_token")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let refresh = val
-                    .get("refresh_token")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let expires_in = val
-                    .get("expires_in")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(86400);
-
-                if !access.is_empty() {
-                    let mut tokens = self.tokens.write().await;
-                    tokens.access_token = access.clone();
-                    if let Some(r) = refresh {
-                        tokens.refresh_token = r;
-                    }
-                    if let Some(u) = val.get("user") {
-                        if let Some(uid) = u.get("userId").and_then(|v| v.as_u64()) {
-                            tokens.user_id = uid;
-                        }
-                        if let Some(cc) = u.get("countryCode").and_then(|v| v.as_str()) {
-                            tokens.country_code = cc.to_string();
-                        }
-                    }
-                    if tokens.user_id == 0 || tokens.country_code.is_empty() {
-                        let (uid, cc) = extract_jwt_claims(&access);
-                        if tokens.user_id == 0 {
-                            tokens.user_id = uid;
-                        }
-                        if tokens.country_code.is_empty() {
-                            tokens.country_code = cc;
-                        }
-                    }
-                    tokens.expires_at = chrono_now() + expires_in;
-                    drop(tokens);
-                    self.save_session().await;
-                    info!("Successfully refreshed TIDAL access token");
+                if self
+                    .apply_refreshed_tokens_to_file(generation, &val, Self::session_file())
+                    .await
+                {
                     return Ok(true);
                 }
+            } else {
+                warn!(
+                    "Failed to parse refresh token JSON (status {}, {} bytes)",
+                    status,
+                    text.len()
+                );
             }
-            warn!(
-                "Failed to parse refresh token JSON (status {}, {} bytes)",
-                status,
-                text.len()
-            );
             Ok(false)
         } else {
             warn!(
@@ -573,14 +534,88 @@ impl AuthManager {
         }
     }
 
+    async fn apply_refreshed_tokens_to_file(
+        &self,
+        expected_generation: u64,
+        val: &serde_json::Value,
+        file: PathBuf,
+    ) -> bool {
+        let access = val
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if access.is_empty() {
+            return false;
+        }
+        let refresh = val
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let expires_in = val
+            .get("expires_in")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(86400);
+
+        let _io_guard = self.session_io_lock.lock().await;
+        if self.session_generation.load(Ordering::SeqCst) != expected_generation {
+            info!("Discarding stale TIDAL token refresh after logout or re-login");
+            return false;
+        }
+
+        let json = {
+            let mut tokens = self.tokens.write().await;
+            tokens.access_token = access.clone();
+            if let Some(r) = refresh {
+                tokens.refresh_token = r;
+            }
+            if let Some(u) = val.get("user") {
+                if let Some(uid) = u.get("userId").and_then(|v| v.as_u64()) {
+                    tokens.user_id = uid;
+                }
+                if let Some(cc) = u.get("countryCode").and_then(|v| v.as_str()) {
+                    tokens.country_code = cc.to_string();
+                }
+            }
+            if tokens.user_id == 0 || tokens.country_code.is_empty() {
+                let (uid, cc) = extract_jwt_claims(&access);
+                if tokens.user_id == 0 {
+                    tokens.user_id = uid;
+                }
+                if tokens.country_code.is_empty() {
+                    tokens.country_code = cc;
+                }
+            }
+            tokens.expires_at = chrono_now() + expires_in;
+            serde_json::to_string_pretty(&*tokens).ok()
+        };
+
+        if let Some(json) = json {
+            save_session_json_to(file, json).await;
+        }
+        info!("Successfully refreshed TIDAL access token");
+        true
+    }
+
     pub async fn logout(&self) {
+        self.logout_from_file(Self::session_file()).await;
+    }
+
+    async fn logout_from_file(&self, file: PathBuf) {
+        // Bump immediately so any refresh awaiting a network response sees the
+        // logout even before we take the session I/O lock, then bump again
+        // inside the lock so in-flight commits and disk removal are atomic.
+        self.session_generation.fetch_add(1, Ordering::SeqCst);
         *self.pending_pkce.lock().await = None;
+        let _io_guard = self.session_io_lock.lock().await;
+        self.session_generation.fetch_add(1, Ordering::SeqCst);
         {
             let mut tokens = self.tokens.write().await;
             *tokens = SessionTokens::default();
         }
-        let file = Self::session_file();
-        let _ = tokio::fs::remove_file(file).await;
+        let tmp = file.with_extension("json.tmp");
+        let _ = tokio::fs::remove_file(&file).await;
+        let _ = tokio::fs::remove_file(&tmp).await;
         info!("Logged out of TIDAL");
     }
 }
@@ -589,6 +624,8 @@ async fn exchange_pkce_code(
     http: &reqwest::Client,
     tokens: &Arc<RwLock<SessionTokens>>,
     pending_pkce: &Arc<tokio::sync::Mutex<Option<PendingPkce>>>,
+    session_io_lock: &Arc<tokio::sync::Mutex<()>>,
+    session_generation: &Arc<AtomicU64>,
     expected_id: u64,
     code: &str,
     code_verifier: &str,
@@ -630,6 +667,10 @@ async fn exchange_pkce_code(
         .await
         .map_err(|e| format!("Failed to parse TIDAL token response: {e}"))?;
 
+    // Hold session_io_lock across pending_pkce check, generation bump, token
+    // update and disk save so logout() cannot interleave with sign-in.
+    let _io_guard = session_io_lock.lock().await;
+
     // Check that this pending login wasn't already completed or cancelled while
     // the HTTP exchange was in flight.
     {
@@ -639,6 +680,8 @@ async fn exchange_pkce_code(
         }
         *guard = None;
     }
+
+    session_generation.fetch_add(1, Ordering::SeqCst);
 
     let json = {
         let mut guard = tokens.write().await;
@@ -676,10 +719,13 @@ async fn exchange_pkce_code(
 }
 
 async fn save_session_json(json: String) {
+    save_session_json_to(AuthManager::session_file(), json).await;
+}
+
+async fn save_session_json_to(file: PathBuf, json: String) {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    let file = AuthManager::session_file();
     let tmp = file.with_extension("json.tmp");
     let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let mut handle = std::fs::OpenOptions::new()
@@ -1039,6 +1085,61 @@ mod tests {
         assert_eq!(loaded.expires_at, 1_900_000_000);
         assert_eq!(loaded.user_id, 42);
         assert_eq!(loaded.country_code, "US");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn in_flight_refresh_is_discarded_after_logout() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidalplayer-auth-logout-race-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("session.json");
+
+        let auth = AuthManager::new();
+        {
+            let mut tokens = auth.tokens.write().await;
+            tokens.access_token = "old-access".to_string();
+            tokens.refresh_token = "old-refresh".to_string();
+            tokens.user_id = 42;
+            tokens.country_code = "US".to_string();
+        }
+        let gen_before_logout = auth.session_generation.load(Ordering::SeqCst);
+
+        // User logs out while the refresh request for the old account is in flight.
+        auth.logout_from_file(file.clone()).await;
+        assert!(!auth.is_logged_in().await);
+        assert!(!file.exists());
+
+        // The old refresh now returns a valid TIDAL response; it must be discarded.
+        let payload = serde_json::json!({
+            "access_token": "restored-old-access",
+            "refresh_token": "restored-old-refresh",
+            "expires_in": 3600,
+            "user": { "userId": 42, "countryCode": "US" }
+        });
+        let applied = auth
+            .apply_refreshed_tokens_to_file(gen_before_logout, &payload, file.clone())
+            .await;
+
+        assert!(!applied, "stale refresh must not commit after logout");
+        assert!(!auth.is_logged_in().await, "logged-out account must stay cleared");
+        assert!(
+            auth.tokens.read().await.refresh_token.is_empty(),
+            "refresh token must remain empty"
+        );
+        assert!(!file.exists(), "session.json must not be recreated after logout");
+
+        // A refresh captured for the current generation still applies normally.
+        let current_gen = auth.session_generation.load(Ordering::SeqCst);
+        let applied_current = auth
+            .apply_refreshed_tokens_to_file(current_gen, &payload, file.clone())
+            .await;
+        assert!(applied_current);
+        assert_eq!(auth.tokens.read().await.access_token, "restored-old-access");
+        assert!(file.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

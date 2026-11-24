@@ -268,7 +268,17 @@ impl Bridge {
         port: u16,
         events: mpsc::UnboundedSender<CastEvent>,
     ) -> Result<Arc<Self>, String> {
-        let tls = connect_transport(host, port, CONNECT_TIMEOUT).await?;
+        let mut tls = connect_transport(host, port, CONNECT_TIMEOUT).await?;
+        let peer_cert_der = tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+            .map(|cert| cert.as_ref().to_vec())
+            .ok_or_else(|| "the cast device presented no TLS certificate".to_string())?;
+        // Verify the receiver via CastV2 Device Authentication before sending
+        // CONNECT, LAUNCH, or any media metadata / manifest URL.
+        super::auth::authenticate_stream(&mut tls, &peer_cert_der, REQUEST_TIMEOUT).await?;
         let (mut reader, mut writer) = tokio::io::split(tls);
 
         let (tx, mut rx) = mpsc::unbounded_channel::<CastMessage>();
@@ -1231,9 +1241,12 @@ async fn resolve_address(host: &str, port: u16) -> Result<std::net::SocketAddr, 
         .ok_or_else(|| "the cast device host did not resolve".to_string())
 }
 
-/// Cast devices present a self-signed certificate and there is no trust chain
-/// to validate against, so the certificate is accepted as-is. The connection
-/// only carries media-control JSON for the device the user picked on the LAN.
+/// Cast devices present an ephemeral self-signed TLS certificate rather than a
+/// WebPKI chain. TLS accepts the peer certificate here so the connection can
+/// immediately run CastV2 Device Authentication (`cast::auth::authenticate_stream`),
+/// which verifies a Google Cast Root CA certificate chain and checks that it
+/// signs this exact TLS peer certificate plus a fresh nonce before any control
+/// or media messages are sent.
 #[derive(Debug)]
 struct AcceptAnyCert(Arc<rustls::crypto::CryptoProvider>);
 

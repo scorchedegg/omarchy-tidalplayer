@@ -237,7 +237,7 @@ Item {
     repeat: true
     running: root.panelOpen && root.svc !== null
     onTriggered: {
-      if (root.alive && root.svc) root.svc.refreshCastDevices(false, null, true)
+      if (root.alive && root.svc && !root.svc.castLoading) root.svc.refreshCastDevices(false, null, true)
     }
   }
 
