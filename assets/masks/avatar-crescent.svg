@@ -1,0 +1,22 @@
+<!-- Crescent mask for the now-playing artist-avatar row: a 36 px circle with the
+     left neighbour's disc removed, plus a 3 px gap so the page shows through
+     the seam.
+
+     Drawn as one explicit crescent outline rather than two overlapping circles
+     with fill-rule="evenodd". The removed disc must be larger than this circle
+     (21 vs 18) to leave a gap, and an even-odd fill paints every region
+     enclosed an odd number of times: including the sliver where the larger disc
+     spills outside this one. That sliver painted the right-hand avatar outside
+     its own circle, showing as short lines at the upper and lower right of the
+     left avatar. Two arcs trace the same shape with no stray geometry.
+
+     Authored for a 36 px avatar at (18,18) overlapped 9 px by its neighbour:
+     that disc sits at (-9,18) with radius 21 = 18 + 3 gap, and the arcs
+     meet it at (6.667, 4.016)/(6.667, 31.984). Keep these numbers in sync with
+     `avatarDiameter`/`avatarOverlap` in PlayerHeader.qml; the image is
+     stretched to the slot. Avoid a double hyphen inside this comment: it is
+     illegal in XML and makes the file unparseable. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+  <path fill="#fff"
+    d="M6.667 4.016 A18 18 0 1 1 6.667 31.984 A21 21 0 0 0 6.667 4.016 Z"/>
+</svg>

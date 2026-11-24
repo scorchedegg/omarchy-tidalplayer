@@ -1,0 +1,33 @@
+[package]
+name = "omarchy-tidalplayer"
+version = "1.0.0"
+edition = "2021"
+authors = ["scorchedegg"]
+description = "High-performance native TIDAL player and daemon for Omarchy"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+axum = { version = "0.8", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json"] }
+dirs = "6.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+parking_lot = "0.12"
+zbus = { version = "5.0", features = ["tokio"] }
+# Casting: mDNS discovery of Chromecast/Google TV devices. The TLS stack is
+# already in the tree through zbus/reqwest, so only the client side is named
+# explicitly; `ring` avoids the aws-lc-rs provider's cmake/nasm build.
+mdns-sd = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+# The player ships as a committed binary (bin/omarchy-tidalplayer) because the
+# plugin is installed as a git checkout with no build step. Keep the artifact
+# small: an unstripped debug build is ~200 MB, a stripped release build is an
+# order of magnitude less.
+[profile.release]
+strip = "symbols"
+

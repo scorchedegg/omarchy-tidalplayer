@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+target/
+daemon/target/
+
+# Local notes & agent session state
+.agents/
+.commandcode/

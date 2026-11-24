@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="100%" height="100%">
+  <g transform="matrix(5.2407 0 0 5.2407 500.0032 500.0021)">
+    <g>
+      <g transform="matrix(6.2943 0 0 -6.2943 0.0014 -29.7683)">
+        <path fill="currentColor" transform="translate(4.7295, 0.001)" d="m 0 0 l -4.729 -4.73 L -9.459 0 l 4.73 4.728 Z"/>
+      </g>
+      <g transform="matrix(6.2943 0 0 -6.2943 0.0014 29.7656)">
+        <path fill="currentColor" transform="translate(4.7295, 0)" d="m 0 0 l -4.729 -4.73 L -9.459 0 l 4.73 4.73 Z"/>
+      </g>
+      <g transform="matrix(6.2943 0 0 -6.2943 -59.5356 -29.769)">
+        <path fill="currentColor" transform="translate(4.7295, 0.0005)" d="m 0 0 l -4.73 -4.73 L -9.459 0 l 4.729 4.729 Z"/>
+      </g>
+      <g transform="matrix(6.2943 0 0 -6.2943 59.5352 -29.769)">
+        <path fill="currentColor" transform="translate(4.7295, 0.0005)" d="m 0 0 l -4.729 -4.73 L -9.459 0 l 4.73 4.729 Z"/>
+      </g>
+    </g>
+  </g>
+</svg>

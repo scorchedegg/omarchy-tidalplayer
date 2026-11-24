@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "id": "scorchedegg.tidalplayer",
+  "name": "TIDAL Player",
+  "version": "1.0.0",
+  "author": "scorchedegg",
+  "description": "Native Hi-Res lossless TIDAL player for Omarchy — 24-bit/192 kHz FLAC straight to PipeWire and lossless Chromecast. Full library, search, synced lyrics, and keyboard-first control right from your bar.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "qml/Service.qml",
+    "barWidget": "qml/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "TIDAL Player",
+    "description": "TIDAL Player now-playing with transport controls, stream quality, and mini player",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "showQualityBadge": false,
+      "maxLabelWidth": 180,
+      "showLabel": true,
+      "hideWhenPaused": false,
+      "animatedArtwork": true,
+      "monitors": ""
+    },
+    "schema": [
+      {
+        "key": "showLabel",
+        "type": "bool",
+        "label": "Show track title"
+      },
+      {
+        "key": "showQualityBadge",
+        "type": "bool",
+        "label": "Show quality badge"
+      },
+      {
+        "key": "maxLabelWidth",
+        "type": "int",
+        "label": "Max label width (px)"
+      },
+      {
+        "key": "hideWhenPaused",
+        "type": "bool",
+        "label": "Hide when paused"
+      },
+      {
+        "key": "animatedArtwork",
+        "type": "bool",
+        "label": "Animate album artwork"
+      },
+      {
+        "key": "monitors",
+        "type": "string",
+        "label": "Only show on monitors",
+        "description": "Comma-separated output names (e.g. DP-1, HDMI-A-1). Leave empty to show on every monitor."
+      }
+    ]
+  },
+  "license": "MIT",
+  "repository": "https://github.com/scorchedegg/omarchy-tidalplayer"
+}
